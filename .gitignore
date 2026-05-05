@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# PyInstaller
+build/
+dist/
+*.spec.bak
+
+# Inno Setup output
+Output/
+
+# App data
+models/*.onnx
+models/*.bin
+models/buffalo_l/
+output/*.mp4
+output/*.avi
+!output/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

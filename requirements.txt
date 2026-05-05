@@ -1,0 +1,20 @@
+# Core
+PyQt6==6.7.0
+numpy==1.26.4
+opencv-python==4.10.0.84
+
+# Pose detection
+mediapipe==0.10.14
+
+# Face swap
+insightface==0.7.3
+onnxruntime==1.18.0
+# Если есть NVIDIA GPU с CUDA — замени на: onnxruntime-gpu==1.18.0
+
+# Utilities
+requests==2.32.3
+tqdm==4.66.4
+Pillow==10.3.0
+
+# Build
+pyinstaller==6.8.0
