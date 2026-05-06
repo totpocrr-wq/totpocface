@@ -1,22 +1,23 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec для FaceSwap Studio.
 
-История падений:
+История:
   v1: упало на onnx.reference (Access Violation)
   v2: упало на onnxruntime.quantization.operators
-  v3 (этот файл): отрезаем onnxruntime.quantization целиком +
-                  большинство модулей onnx, кроме core, нужного runtime.
-
-Подход — собираем submodules выборочно, без рекурсии в quantization/tools/transformers.
+  v3: успешная сборка, но в рантайме отсутствовал matplotlib
+  v4 (этот файл): добавлен matplotlib обратно и принудительный сбор scipy/sklearn
 """
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import (
+    collect_data_files,
+    collect_submodules,
+    collect_dynamic_libs,
+)
 
 block_cipher = None
 
 # ---------- Данные ----------
 mediapipe_data = collect_data_files("mediapipe")
 insightface_data = collect_data_files("insightface")
-# Берём только бинарные части onnxruntime, без quantization-данных
 onnxruntime_data = collect_data_files(
     "onnxruntime",
     excludes=["**/quantization/**", "**/transformers/**", "**/tools/**"],
@@ -24,7 +25,6 @@ onnxruntime_data = collect_data_files(
 
 # ---------- Утилита ----------
 def safe_submodules(pkg, exclude_prefixes=()):
-    """submodules без указанных префиксов (например, 'tools.', 'quantization.')."""
     mods = collect_submodules(pkg)
     bad = tuple(pkg + "." + p for p in exclude_prefixes)
     return [m for m in mods if not any(m.startswith(b) for b in bad)]
@@ -33,7 +33,7 @@ def safe_submodules(pkg, exclude_prefixes=()):
 # ---------- Hidden imports ----------
 hidden = []
 
-# MediaPipe — без тестов и десктоп-примеров
+# MediaPipe
 hidden += safe_submodules(
     "mediapipe",
     exclude_prefixes=(
@@ -50,8 +50,23 @@ hidden += safe_submodules(
     exclude_prefixes=("commands", "thirdparty.face3d.mesh_numpy"),
 )
 
-# onnxruntime — только то, что нужно для inference: capi, core, datasets
-# ВАЖНО: НЕ собираем submodules для quantization/transformers/tools/training/backend
+# scipy — собираем всё, чтобы не было "module not found" в рантайме
+hidden += collect_submodules("scipy")
+
+# sklearn — insightface через albumentations требует его
+hidden += collect_submodules(
+    "sklearn",
+    filter=lambda name: not name.startswith("sklearn.datasets")
+                        and not name.startswith("sklearn.experimental"),
+)
+
+# albumentations — без pytorch-расширений
+hidden += collect_submodules(
+    "albumentations",
+    filter=lambda name: not name.startswith("albumentations.pytorch"),
+)
+
+# onnxruntime — только runtime
 hidden += [
     "onnxruntime",
     "onnxruntime.capi",
@@ -71,17 +86,25 @@ hidden += [
 hidden += ["cv2"]
 
 
+# ---------- Бинарники ----------
+# scipy и numpy включают .pyd файлы, которые иначе не подхватываются
+binaries = []
+binaries += collect_dynamic_libs("scipy")
+binaries += collect_dynamic_libs("numpy")
+binaries += collect_dynamic_libs("sklearn")
+
+
 # ---------- Чёрный список ----------
 excludes = [
-    # ===== onnx — режем всё, кроме базового =====
-    "onnx.reference",         # крашил v1
+    # onnx — режем рекурсивные/тестовые
+    "onnx.reference",
     "onnx.backend",
     "onnx.backend.test",
     "onnx.tools",
     "onnx.examples",
     "onnx.test",
 
-    # ===== onnxruntime — quantization крашил v2 =====
+    # onnxruntime — quantization крашит сборку
     "onnxruntime.quantization",
     "onnxruntime.quantization.operators",
     "onnxruntime.quantization.fusions",
@@ -93,44 +116,40 @@ excludes = [
     "onnxruntime.backend",
     "onnxruntime.datasets",
 
-    # ===== JAX — пришёл через onnxruntime.transformers =====
+    # JAX — балласт
     "jax", "jaxlib", "flatbuffers",
     "jax._src", "jaxlib.mlir",
 
-    # ===== Тяжёлые библиотеки, которые потянул insightface =====
-    # sklearn нельзя отрезать целиком — insightface её использует
+    # Тяжёлое из sklearn/skimage
     "sklearn.datasets",
     "sklearn.experimental",
     "skimage.data",
 
-    # ===== GUI и dev-инструменты =====
+    # GUI и dev-тулзы (matplotlib НЕ исключаем — нужен mediapipe!)
     "matplotlib.tests",
     "tkinter", "PyQt5", "PySide2", "PySide6",
     "IPython", "jupyter", "notebook",
     "pytest", "_pytest",
 
-    # ===== mediapipe тестовое =====
+    # mediapipe тестовое
     "mediapipe.examples",
     "mediapipe.tasks.python.test",
     "mediapipe.tasks.cc.metadata.tests",
     "insightface.commands",
 
-    # ===== albumentations.pytorch не используется без torch =====
+    # albumentations.pytorch не используется
     "albumentations.pytorch",
 
-    # ===== ml_dtypes — экзотические типы данных, нам не нужны =====
-    # (если что-то сломается, вернуть)
-    # "ml_dtypes",
-
-    # ===== sympy — символьная математика =====
+    # sympy — символьная математика, не нужна
     "sympy",
 ]
+
 
 # ---------- Сборка ----------
 a = Analysis(
     ["main.py"],
     pathex=[],
-    binaries=[],
+    binaries=binaries,
     datas=mediapipe_data + insightface_data + onnxruntime_data,
     hiddenimports=hidden,
     hookspath=[],
