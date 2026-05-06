@@ -104,7 +104,7 @@ excludes = [
     "skimage.data",
 
     # ===== GUI и dev-инструменты =====
-    "matplotlib", "matplotlib.tests",
+    "matplotlib.tests",
     "tkinter", "PyQt5", "PySide2", "PySide6",
     "IPython", "jupyter", "notebook",
     "pytest", "_pytest",
