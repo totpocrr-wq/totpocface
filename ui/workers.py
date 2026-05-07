@@ -110,7 +110,7 @@ class ModelInitWorker(QThread):
 class SourceLoadWorker(QThread):
     """Загрузка исходного лица из фото или видео."""
 
-    finished_ok = pyqtSignal(bool)  # успех / нет
+    finished_ok = pyqtSignal(object)  # FaceLoadError enum
     error = pyqtSignal(str)
 
     def __init__(self, swapper: FaceSwapper, source_path: Path, parent=None):
@@ -122,10 +122,10 @@ class SourceLoadWorker(QThread):
         try:
             ext = self.source_path.suffix.lower()
             if ext in {".mp4", ".mov", ".avi", ".mkv", ".webm"}:
-                ok = self.swapper.set_source_from_video(self.source_path)
+                result = self.swapper.set_source_from_video(self.source_path)
             else:
-                ok = self.swapper.set_source_from_image(self.source_path)
-            self.finished_ok.emit(ok)
+                result = self.swapper.set_source_from_image(self.source_path)
+            self.finished_ok.emit(result)
         except Exception as e:
             self.error.emit(f"{e}\n{traceback.format_exc()}")
 

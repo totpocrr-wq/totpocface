@@ -54,14 +54,28 @@ class Card(QFrame):
 class DropZone(QLabel):
     """Область drag-and-drop для фото/видео-источника."""
 
+    DEFAULT_TEXT = "Перетащи сюда фото или видео\nс лицом-донором (Б)"
+
     def __init__(self, on_file_dropped, parent=None):
         super().__init__(parent)
         self.setObjectName("dropzone")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setText("Перетащи сюда фото или видео\nс лицом, которое подменяем")
-        self.setMinimumHeight(140)
+        self.setText(self.DEFAULT_TEXT)
+        # Фиксированная высота — чтобы карточка не «прыгала», когда меняется текст
+        self.setFixedHeight(110)
+        self.setWordWrap(True)
         self.setAcceptDrops(True)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._on_dropped = on_file_dropped
+
+    def set_filename(self, name: str):
+        """Показывает имя файла, обрезая если слишком длинное."""
+        if len(name) > 40:
+            name = name[:18] + "…" + name[-18:]
+        self.setText(f"📄 {name}")
+
+    def reset_text(self):
+        self.setText(self.DEFAULT_TEXT)
 
     def dragEnterEvent(self, e: QDragEnterEvent):
         if e.mimeData().hasUrls():
@@ -174,7 +188,7 @@ class MainWindow(QMainWindow):
         right.setContentsMargins(0, 0, 0, 0)
 
         # Шаг 1: камера
-        cam_card = Card("01  Камера")
+        cam_card = Card("01  Камера — лицо А (исходное)")
         cam_row = QHBoxLayout()
         self.camera_combo = QComboBox()
         self.camera_combo.setMinimumWidth(180)
@@ -191,7 +205,7 @@ class MainWindow(QMainWindow):
         right.addWidget(cam_card)
 
         # Шаг 2: запись
-        rec_card = Card("02  Запись видео")
+        rec_card = Card("02  Запись видео с лицом А")
         self.record_btn = QPushButton("● Начать запись")
         self.record_btn.setObjectName("primary")
         self.record_btn.setEnabled(False)
@@ -200,24 +214,29 @@ class MainWindow(QMainWindow):
         self.record_status = QLabel("Запусти камеру, чтобы начать запись")
         self.record_status.setObjectName("subtitle")
         self.record_status.setWordWrap(True)
+        self.record_status.setMinimumHeight(20)
         rec_card.add(self.record_status)
         right.addWidget(rec_card)
 
-        # Шаг 3: источник лица
-        src_card = Card("03  Лицо для замены")
+        # Шаг 3: лицо-донор Б
+        src_card = Card("03  Лицо-донор Б (на которое заменяем)")
         self.dropzone = DropZone(self._on_source_dropped)
         src_card.add(self.dropzone)
         browse_btn = QPushButton("Выбрать файл…")
         browse_btn.clicked.connect(self._browse_source)
         src_card.add(browse_btn)
-        self.source_status = QLabel("Источник не выбран")
+        self.source_status = QLabel("Лицо-донор Б не выбран")
         self.source_status.setObjectName("subtitle")
         self.source_status.setWordWrap(True)
+        self.source_status.setMinimumHeight(36)
+        self.source_status.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
         src_card.add(self.source_status)
         right.addWidget(src_card)
 
         # Шаг 4: обработка
-        proc_card = Card("04  Обработка")
+        proc_card = Card("04  Замена А → Б")
         self.process_btn = QPushButton("Заменить лицо в записи")
         self.process_btn.setObjectName("primary")
         self.process_btn.setEnabled(False)
@@ -406,25 +425,32 @@ class MainWindow(QMainWindow):
                 "Подожди завершения инициализации моделей.",
             )
             return
-        self.source_status.setText(f"Извлекаю лицо из {path.name}…")
-        self.dropzone.setText(path.name)
+        self.source_status.setText(f"Ищу лицо Б в {path.name}…")
+        self.source_status.setStyleSheet(f"color: {COLORS['text_muted']};")
+        self.dropzone.set_filename(path.name)
 
         self.source_worker = SourceLoadWorker(self.swapper, path)
         self.source_worker.finished_ok.connect(
             lambda ok: self._on_source_loaded(ok, path)
         )
         self.source_worker.error.connect(
-            lambda m: QMessageBox.critical(self, "Ошибка источника", m)
+            lambda m: QMessageBox.critical(self, "Ошибка загрузки лица Б", m)
         )
         self.source_worker.start()
 
-    @pyqtSlot(bool, Path)
-    def _on_source_loaded(self, ok: bool, path: Path):
-        if ok:
-            self.source_status.setText(f"✓ Лицо извлечено из {path.name}")
+    @pyqtSlot(object, Path)
+    def _on_source_loaded(self, result, path: Path):
+        # result — это FaceLoadError из core.face_swapper
+        from core.face_swapper import FaceLoadError
+
+        if result == FaceLoadError.OK:
+            self.source_status.setText(f"✓ Лицо Б извлечено из {path.name}")
             self.source_status.setStyleSheet(f"color: {COLORS['ok']};")
         else:
-            self.source_status.setText("Лицо не найдено. Попробуй другой файл.")
+            # У FaceLoadError значение — это сразу человекочитаемое сообщение
+            msg = result.value if hasattr(result, "value") else "Лицо Б не найдено."
+            self.source_status.setText(msg)
+            self.source_status.setWordWrap(True)
             self.source_status.setStyleSheet(f"color: {COLORS['danger']};")
         self._update_process_button()
 

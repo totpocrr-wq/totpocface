@@ -151,7 +151,7 @@ QLabel#dropzone {{
     border: 2px dashed {COLORS['border']};
     border-radius: 10px;
     color: {COLORS['text_muted']};
-    padding: 24px;
+    padding: 12px;
 }}
 QLabel#dropzone[active="true"] {{
     border-color: {COLORS['accent']};

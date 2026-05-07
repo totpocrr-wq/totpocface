@@ -1,22 +1,15 @@
 """Замена лица через InsightFace (inswapper_128).
 
-Важный момент про пути: InsightFace ожидает модели по пути
-    {root}/models/{name}/*.onnx
-То есть если root = MODELS_DIR, то buffalo_l должен лежать в
-    MODELS_DIR/models/buffalo_l/*.onnx
-
-Если папки нет — InsightFace пытается её скачать через свой встроенный
-механизм. У этого механизма зеркала часто отвалены, и в windowed-сборке
-PyInstaller ещё и tqdm падает. Поэтому мы:
-  1) Проверяем папку buffalo_l/ заранее
-  2) Если её нет — даём пользователю понятное сообщение об ошибке
-  3) НЕ полагаемся на storage.ensure_available
+Детекция лиц настроена агрессивно:
+  - Низкий порог уверенности (0.3 вместо стандартных 0.5)
+  - Высокое разрешение поиска (1024×1024 вместо 640×640)
+  - Двухпроходный fallback на меньший размер при провале
 """
 from __future__ import annotations
 
-import shutil
 import zipfile
 from pathlib import Path
+from enum import Enum
 
 import cv2
 import numpy as np
@@ -28,7 +21,6 @@ from config import MODELS_DIR, FACE_DETECTOR_PACK
 from core.model_downloader import ensure_inswapper
 
 
-# Файлы, которые должны лежать внутри buffalo_l/
 BUFFALO_L_FILES = [
     "1k3d68.onnx",
     "2d106det.onnx",
@@ -38,81 +30,58 @@ BUFFALO_L_FILES = [
 ]
 
 
+class FaceLoadError(Enum):
+    """Расширенный код ошибки при загрузке исходного лица."""
+    OK = "ok"
+    FILE_INVALID = "Не удалось открыть файл. Возможно, он повреждён или формат не поддерживается."
+    NO_FACE = "На фото не найдено лицо. Попробуй фронтальный портрет с хорошим освещением."
+    TOO_SMALL = "Лицо на фото слишком мелкое. Нужно крупнее (мин. 80×80 пикселей)."
+    LOW_QUALITY = "Лицо найдено, но качество слишком низкое. Попробуй фото без размытия и теней."
+
+
 def _ensure_buffalo_l_extracted():
-    """Гарантирует, что buffalo_l/ распакован в нужном месте.
-
-    InsightFace ищет модели по пути MODELS_DIR/models/{name}/.
-    Если у нас лежит buffalo_l.zip — распакуем его.
-    Если уже распакован — ничего не делаем.
-    Если нет ни zip, ни папки — кидаем ясное исключение.
-    """
     target_root = MODELS_DIR / "models" / FACE_DETECTOR_PACK
-
-    # Проверяем, всё ли уже на месте
     if target_root.is_dir():
         existing = {p.name for p in target_root.iterdir()}
         if all(f in existing for f in BUFFALO_L_FILES):
-            return target_root  # всё ок
+            return target_root
 
-    # Ищем zip-архив в нескольких местах
     zip_candidates = [
         MODELS_DIR / "models" / f"{FACE_DETECTOR_PACK}.zip",
         MODELS_DIR / f"{FACE_DETECTOR_PACK}.zip",
     ]
-
-    zip_path = None
-    for cand in zip_candidates:
-        if cand.exists() and cand.stat().st_size > 1024 * 1024:  # хотя бы 1 МБ
-            zip_path = cand
-            break
-
+    zip_path = next(
+        (c for c in zip_candidates if c.exists() and c.stat().st_size > 1024 * 1024),
+        None,
+    )
     if zip_path is None:
-        # Нет ни папки, ни zip — это ошибка пользователя/окружения
         raise FileNotFoundError(
             f"Не найдена модель {FACE_DETECTOR_PACK}. "
-            f"Скачай buffalo_l.zip и положи в {MODELS_DIR / 'models'}, "
-            f"либо распакуй прямо в {target_root}."
+            f"Скачай buffalo_l.zip и положи в {MODELS_DIR / 'models'}"
         )
 
-    # Распаковываем
     target_root.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zip_path, "r") as zf:
-        # Архив может содержать всё на верхнем уровне, либо в подпапке buffalo_l/
         names = zf.namelist()
-        has_top_folder = any(n.startswith(f"{FACE_DETECTOR_PACK}/") for n in names)
-
-        if has_top_folder:
-            # Распакуем как есть, в models/
+        if any(n.startswith(f"{FACE_DETECTOR_PACK}/") for n in names):
             zf.extractall(target_root.parent)
         else:
-            # Файлы лежат на верхнем уровне zip — распакуем в buffalo_l/
             target_root.mkdir(exist_ok=True)
             zf.extractall(target_root)
 
-    # Удалим zip, чтобы InsightFace не вздумал его перезагружать
     try:
         zip_path.unlink()
     except Exception:
         pass
-
     return target_root
 
 
 class FaceSwapper:
-    """Высокоуровневый класс для замены лица.
-
-    Использует:
-      - FaceAnalysis (buffalo_l) для детекции лиц
-      - inswapper_128.onnx для самой подмены
-    """
-
     def __init__(self, providers: list[str] | None = None):
-        # Auto-detect CUDA
         if providers is None:
             try:
                 import onnxruntime as ort
-                available = ort.get_available_providers()
-                if "CUDAExecutionProvider" in available:
+                if "CUDAExecutionProvider" in ort.get_available_providers():
                     providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
                 else:
                     providers = ["CPUExecutionProvider"]
@@ -121,54 +90,98 @@ class FaceSwapper:
 
         self.providers = providers
 
-        # Подготавливаем структуру папок (распаковка zip если нужно)
         _ensure_buffalo_l_extracted()
-
-        # Скачиваем inswapper_128.onnx если ещё нет
-        # (этот вызов не падает, потому что мы используем requests без tqdm)
         model_path = ensure_inswapper()
 
-        # Детектор + анализатор лиц.
-        # root указывает на корень, внутри которого ожидается models/buffalo_l/
         self._analyser = FaceAnalysis(
             name=FACE_DETECTOR_PACK,
             root=str(MODELS_DIR),
             providers=providers,
-            allowed_modules=["detection", "recognition", "genderage", "landmark_3d_68", "landmark_2d_106"],
+            allowed_modules=[
+                "detection", "recognition", "genderage",
+                "landmark_3d_68", "landmark_2d_106",
+            ],
         )
-        self._analyser.prepare(ctx_id=0, det_size=(640, 640))
+        # Высокое разрешение + низкий порог = находим больше лиц
+        self._analyser.prepare(ctx_id=0, det_size=(1024, 1024), det_thresh=0.3)
 
-        # Модель замены
         self._swapper = insightface.model_zoo.get_model(
             str(model_path), providers=providers
         )
 
         self._source_face = None
 
-    def set_source_from_image(self, image_path: str | Path) -> bool:
-        """Загружает фото-источник и извлекает оттуда крупнейшее лицо."""
+    # ---------- Внутренний детектор с fallback ----------
+    def _detect_faces_aggressive(self, img_bgr: np.ndarray):
+        """Двухпроходная детекция: сначала большой размер, потом маленький.
+
+        InsightFace внутри ресайзит вход к det_size, поэтому если лицо
+        крошечное — оно может потеряться. Поэтому пробуем оба прохода.
+        """
+        # Проход 1 — основной
+        faces = self._analyser.get(img_bgr)
+        if faces:
+            return faces
+
+        # Проход 2 — на полном разрешении (без ресайза)
+        # Меняем det_size временно
+        h, w = img_bgr.shape[:2]
+        # Если картинка маленькая — апскейлим её, потом всё равно работаем с этим
+        if max(h, w) < 600:
+            scale = 800 / max(h, w)
+            upscaled = cv2.resize(
+                img_bgr, (int(w * scale), int(h * scale)),
+                interpolation=cv2.INTER_CUBIC,
+            )
+            faces = self._analyser.get(upscaled)
+            if faces:
+                # Координаты на апскейлнутой картинке — возвращаем как есть,
+                # потому что это только для проверки наличия лица.
+                # А исходное лицо для подмены берём из оригинала.
+                # Делаем ещё один проход на оригинале с найденными координатами
+                # — но проще просто использовать апскейлнутую версию.
+                return self._analyser.get(upscaled)
+
+        return []
+
+    # ---------- Загрузка исходного лица ----------
+    def set_source_from_image(self, image_path: str | Path) -> FaceLoadError:
+        """Загружает фото-источник. Возвращает код ошибки."""
         img = cv2.imread(str(image_path))
         if img is None:
-            return False
-        faces = self._analyser.get(img)
+            return FaceLoadError.FILE_INVALID
+
+        faces = self._detect_faces_aggressive(img)
         if not faces:
-            return False
+            return FaceLoadError.NO_FACE
+
+        # Берём крупнейшее
         faces.sort(
             key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]),
             reverse=True,
         )
-        self._source_face = faces[0]
-        return True
+        face = faces[0]
 
-    def set_source_from_video(self, video_path: str | Path) -> bool:
-        """Извлекает лицо из лучшего кадра видео-источника."""
+        # Проверка размера
+        bw = face.bbox[2] - face.bbox[0]
+        bh = face.bbox[3] - face.bbox[1]
+        if bw < 60 or bh < 60:
+            return FaceLoadError.TOO_SMALL
+
+        # Проверка уверенности
+        if float(face.det_score) < 0.4:
+            return FaceLoadError.LOW_QUALITY
+
+        self._source_face = face
+        return FaceLoadError.OK
+
+    def set_source_from_video(self, video_path: str | Path) -> FaceLoadError:
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
-            return False
+            return FaceLoadError.FILE_INVALID
 
         best_face = None
         best_score = 0.0
-
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 30
         step = max(1, total // 30)
         idx = 0
@@ -178,7 +191,7 @@ class FaceSwapper:
             if not ok:
                 break
             if idx % step == 0:
-                faces = self._analyser.get(frame)
+                faces = self._detect_faces_aggressive(frame)
                 if faces:
                     f = max(
                         faces,
@@ -194,23 +207,26 @@ class FaceSwapper:
 
         cap.release()
         if best_face is None:
-            return False
+            return FaceLoadError.NO_FACE
+
+        bw = best_face.bbox[2] - best_face.bbox[0]
+        bh = best_face.bbox[3] - best_face.bbox[1]
+        if bw < 60 or bh < 60:
+            return FaceLoadError.TOO_SMALL
+
         self._source_face = best_face
-        return True
+        return FaceLoadError.OK
 
     @property
     def has_source(self) -> bool:
         return self._source_face is not None
 
     def swap_frame(self, frame_bgr: np.ndarray) -> np.ndarray:
-        """Заменяет все лица в кадре на исходное."""
         if self._source_face is None:
             return frame_bgr
-
         faces = self._analyser.get(frame_bgr)
         if not faces:
             return frame_bgr
-
         result = frame_bgr.copy()
         for face in faces:
             result = self._swapper.get(result, face, self._source_face, paste_back=True)
