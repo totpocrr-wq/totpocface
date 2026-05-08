@@ -5,7 +5,7 @@ import sys
 
 
 APP_NAME = "FaceSwap Studio"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.1"
 APP_FOLDER_NAME = "FaceSwapStudio"
 
 
@@ -61,6 +61,15 @@ FACE_DETECTOR_PACK = "buffalo_l"
 # используем интерполяцию (трекинг). 1 = каждый кадр (медленно, точно),
 # 2 = каждый второй (быстрее в 1.5×), 3 = каждый третий (быстрее в 2×).
 FACE_DETECT_EVERY_N_FRAMES = 2
+
+# В live-режиме можно жертвовать качеством ради скорости
+FACE_DETECT_EVERY_N_FRAMES_LIVE = 5  # детектим раз в 5 кадров
+
+# Разрешение камеры. Обычный режим — 720p, live — 480p (быстрее)
+CAMERA_WIDTH = 1280
+CAMERA_HEIGHT = 720
+CAMERA_WIDTH_LIVE = 640
+CAMERA_HEIGHT_LIVE = 480
 
 # Параллелизм покадровой обработки. На CPU стоит ставить max(1, cpu//2),
 # чтобы не упереться в память. На CUDA — 1 (GPU и так загружен).

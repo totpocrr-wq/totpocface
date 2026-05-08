@@ -37,30 +37,72 @@ def detect_best_providers() -> tuple[list[str], str]:
     """Определяет лучшие ONNX providers и возвращает (providers, label).
 
     label — короткая метка для UI: "GPU (CUDA)" или "CPU".
-    Сделано осторожно: проверяет не только наличие CUDAExecutionProvider
-    в списке, но и реальную возможность создать InferenceSession на CUDA.
+
+    Делает РЕАЛЬНУЮ проверку: создаёт крошечную ONNX-модель в памяти и
+    пытается запустить её на CUDA. Если CUDA Toolkit или cuDNN не
+    установлены — onnxruntime упадёт или молча откатится на CPU.
+    Мы детектим оба случая.
     """
     try:
         import onnxruntime as ort
         available = ort.get_available_providers()
-        if "CUDAExecutionProvider" in available:
-            # Проверяем, что CUDA реально работает (Toolkit + cuDNN установлены)
-            try:
-                # Минимальный тест: создаём пустую сессию с CUDA
-                # Если CUDA Toolkit/cuDNN не установлен — упадёт с warning'ом
-                so = ort.SessionOptions()
-                so.log_severity_level = 3  # FATAL only
-                # Реальный тест делать не будем (нет модели под рукой),
-                # но если провайдер в списке — высока вероятность что работает.
-                return (
-                    ["CUDAExecutionProvider", "CPUExecutionProvider"],
-                    "GPU (CUDA)",
-                )
-            except Exception:
-                pass
+        if "CUDAExecutionProvider" not in available:
+            return ["CPUExecutionProvider"], "CPU"
+
+        # === Реальный тест CUDA ===
+        # Создаём мини ONNX-модель (Identity) и пробуем выполнить её на CUDA.
+        # Если cuDNN или CUDA Toolkit не установлены, это упадёт с конкретной
+        # ошибкой про отсутствие DLL (cublas64_*, cudnn64_*).
+        try:
+            import numpy as np
+            from onnx import helper, TensorProto
+            import io
+
+            input_tensor = helper.make_tensor_value_info(
+                "x", TensorProto.FLOAT, [1, 3]
+            )
+            output_tensor = helper.make_tensor_value_info(
+                "y", TensorProto.FLOAT, [1, 3]
+            )
+            node = helper.make_node("Identity", ["x"], ["y"])
+            graph = helper.make_graph([node], "test", [input_tensor], [output_tensor])
+            model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+            model.ir_version = 7
+
+            buf = io.BytesIO()
+            buf.write(model.SerializeToString())
+
+            so = ort.SessionOptions()
+            so.log_severity_level = 3
+
+            # Создаём сессию ТОЛЬКО на CUDA (без CPU fallback).
+            # Если CUDA не работает — упадёт.
+            sess = ort.InferenceSession(
+                buf.getvalue(),
+                sess_options=so,
+                providers=["CUDAExecutionProvider"],
+            )
+
+            # Проверяем что провайдер действительно CUDA
+            actual = sess.get_providers()
+            if "CUDAExecutionProvider" not in actual:
+                return ["CPUExecutionProvider"], "CPU"
+
+            # Реальный инференс — если cuDNN не подгрузилась, упадёт здесь
+            x = np.zeros((1, 3), dtype=np.float32)
+            sess.run(None, {"x": x})
+
+            # CUDA реально работает
+            return (
+                ["CUDAExecutionProvider", "CPUExecutionProvider"],
+                "GPU (CUDA)",
+            )
+        except Exception as e:
+            # CUDA провайдер числится, но не работает (нет Toolkit/cuDNN)
+            print(f"[providers] CUDA test failed, falling back to CPU: {e}")
+            return ["CPUExecutionProvider"], "CPU"
     except Exception:
-        pass
-    return ["CPUExecutionProvider"], "CPU"
+        return ["CPUExecutionProvider"], "CPU"
 
 
 def _ensure_buffalo_l_extracted():
@@ -122,7 +164,14 @@ class FaceSwapper:
                 "landmark_3d_68", "landmark_2d_106",
             ],
         )
-        self._analyser.prepare(ctx_id=0, det_size=(1024, 1024), det_thresh=0.3)
+        # На CPU 1024×1024 работает в 10 раз медленнее. Если CUDA не работает,
+        # используем 320×320 — это в 10 раз быстрее, потеря качества ~5%.
+        # Для веб-камеры в live режиме лица всё равно крупные.
+        if "CUDAExecutionProvider" in providers:
+            det_size = (1024, 1024)
+        else:
+            det_size = (320, 320)
+        self._analyser.prepare(ctx_id=0, det_size=det_size, det_thresh=0.3)
 
         self._swapper = insightface.model_zoo.get_model(
             str(model_path), providers=providers

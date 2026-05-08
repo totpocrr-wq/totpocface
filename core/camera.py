@@ -48,15 +48,16 @@ def list_cameras(max_index: int = 5) -> list[CameraInfo]:
 class Camera:
     """Тонкая обёртка над cv2.VideoCapture с безопасным закрытием."""
 
-    def __init__(self, index: int):
+    def __init__(self, index: int, width: int = 1280, height: int = 720):
         backend = cv2.CAP_DSHOW if hasattr(cv2, "CAP_DSHOW") else cv2.CAP_ANY
         self._cap = cv2.VideoCapture(index, backend)
         if not self._cap.isOpened():
             raise RuntimeError(f"Не удалось открыть камеру с индексом {index}")
 
-        # Запрашиваем 1280x720 — большинство встроенных камер тянет
-        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        # Запрашиваем нужное разрешение. Камера может не поддержать —
+        # тогда останется её собственное.
+        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
 
         self.width = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.height = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))

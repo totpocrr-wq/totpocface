@@ -453,11 +453,12 @@ class MainWindow(QMainWindow):
         else:
             self._start_camera()
 
-    def _start_camera(self):
+    def _spawn_camera(self, live_mode: bool = False):
+        """Создаёт и запускает CameraWorker в нужном режиме."""
         idx = self.camera_combo.currentData()
         if idx is None:
-            return
-        self.camera_worker = CameraWorker(idx)
+            return False
+        self.camera_worker = CameraWorker(idx, live_mode=live_mode)
         self.camera_worker.frame_ready.connect(self._on_frame)
         self.camera_worker.person_status.connect(self._on_person_status)
         self.camera_worker.fps_update.connect(self._on_fps_update)
@@ -465,6 +466,11 @@ class MainWindow(QMainWindow):
             lambda m: QMessageBox.critical(self, "Ошибка камеры", m)
         )
         self.camera_worker.start()
+        return True
+
+    def _start_camera(self):
+        if not self._spawn_camera(live_mode=False):
+            return
         self.start_cam_btn.setText("Остановить камеру")
         self.record_btn.setEnabled(True)
         self.record_status.setText("Готов к записи")
@@ -717,14 +723,32 @@ class MainWindow(QMainWindow):
             self._toggle_live()
 
     def _toggle_live(self):
-        """Включает / выключает Live face swap."""
+        """Включает / выключает Live face swap.
+
+        При смене режима ПЕРЕЗАПУСКАЕТ камеру:
+          - Включение: переключаем камеру в low-res live режим без MediaPipe Pose
+          - Выключение: возвращаем обычное разрешение и pose detection
+        """
         if not self.live_enabled:
-            # ВКЛЮЧЕНИЕ
+            # ===== ВКЛЮЧЕНИЕ =====
             if not (self.camera_worker and self.swapper and self.swapper.has_source):
                 return
-            # Создаём engine при первом включении (или после reset)
+
+            # Создаём engine при первом включении
             if self.live_engine is None:
                 self.live_engine = LiveSwapEngine(self.swapper)
+
+            # Перезапускаем камеру в live-режиме (low-res, без pose)
+            self.camera_worker.stop()
+            self.camera_worker = None
+            self.preview_label.setText("Переключение в Live...")
+            QApplication.processEvents()
+
+            if not self._spawn_camera(live_mode=True):
+                self.live_status.setText("Не удалось перезапустить камеру в Live")
+                self.live_status.setStyleSheet(f"color: {COLORS['danger']};")
+                return
+
             self.camera_worker.attach_live_engine(self.live_engine)
             self.camera_worker.set_live_enabled(True)
             self.live_enabled = True
@@ -733,19 +757,31 @@ class MainWindow(QMainWindow):
             self.fps_label.setText("FPS: …")
             self.virtual_cam_chk.setEnabled(True)
             self.live_status.setText(
-                "Live включён. Лицо подменяется в реальном времени."
+                "Live включён. Скелет отключён, разрешение 640×480 для скорости."
             )
             self.live_status.setStyleSheet(f"color: {COLORS['ok']};")
+            # Хинт про FPS
+            label = getattr(self.swapper, "providers_label", "CPU")
+            if "CUDA" not in label:
+                self.live_status.setText(
+                    self.live_status.text() +
+                    " ВНИМАНИЕ: CUDA не работает, FPS будет низким."
+                )
+                self.live_status.setStyleSheet(f"color: {COLORS['accent']};")
         else:
-            # ВЫКЛЮЧЕНИЕ
+            # ===== ВЫКЛЮЧЕНИЕ =====
             if self.virtual_cam_chk.isChecked():
                 self.virtual_cam_chk.setChecked(False)
-            if self.camera_worker:
-                self.camera_worker.set_live_enabled(False)
-                self.camera_worker.attach_live_engine(None)
             if self.live_engine:
                 self.live_engine.close()
             self.live_enabled = False
+
+            # Перезапускаем камеру в обычном режиме (HD, с pose)
+            if self.camera_worker:
+                self.camera_worker.stop()
+                self.camera_worker = None
+                self._spawn_camera(live_mode=False)
+
             self.live_toggle_btn.setText("🔴 Включить Live")
             self.fps_label.setVisible(False)
             self.virtual_cam_chk.setEnabled(False)

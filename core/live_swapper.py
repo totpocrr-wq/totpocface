@@ -23,7 +23,7 @@ from typing import Callable
 import cv2
 import numpy as np
 
-from config import FACE_DETECT_EVERY_N_FRAMES
+from config import FACE_DETECT_EVERY_N_FRAMES_LIVE
 from core.camera import Camera
 from core.face_swapper import FaceSwapper
 
@@ -49,7 +49,7 @@ class LiveSwapEngine:
     def __init__(
         self,
         swapper: FaceSwapper,
-        detect_every: int = FACE_DETECT_EVERY_N_FRAMES,
+        detect_every: int = FACE_DETECT_EVERY_N_FRAMES_LIVE,
     ):
         self.swapper = swapper
         self.detect_every = detect_every
