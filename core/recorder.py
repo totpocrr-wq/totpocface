@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from config import OUTPUT_DIR, RECORD_CODEC, RECORD_EXT, RECORD_FPS
+from core.cv_io import videowriter_safe
 
 
 class VideoRecorder:
@@ -35,8 +36,8 @@ class VideoRecorder:
             h, w = frame_bgr.shape[:2]
             self._frame_size = (w, h)
             fourcc = cv2.VideoWriter_fourcc(*RECORD_CODEC)
-            self._writer = cv2.VideoWriter(
-                str(self._path), fourcc, self.fps, self._frame_size
+            self._writer = videowriter_safe(
+                self._path, fourcc, self.fps, self._frame_size
             )
             if not self._writer.isOpened():
                 raise RuntimeError(f"Не удалось открыть VideoWriter для {self._path}")

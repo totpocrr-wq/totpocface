@@ -137,10 +137,17 @@ class ProcessVideoWorker(QThread):
     finished_ok = pyqtSignal(object)  # Path
     error = pyqtSignal(str)
 
-    def __init__(self, swapper: FaceSwapper, target_video: Path, parent=None):
+    def __init__(
+        self,
+        swapper: FaceSwapper,
+        target_video: Path,
+        overlays: list | None = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.swapper = swapper
         self.target_video = target_video
+        self.overlays = overlays or []
         self._cancel = False
 
     def cancel(self):
@@ -151,6 +158,7 @@ class ProcessVideoWorker(QThread):
             out = process_video(
                 self.target_video,
                 self.swapper,
+                overlays=self.overlays,
                 progress_cb=lambda d, t: self.progress.emit(d, t),
                 cancel_flag=lambda: self._cancel,
             )

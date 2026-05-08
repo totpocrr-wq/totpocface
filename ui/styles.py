@@ -62,7 +62,8 @@ QPushButton {{
     background-color: {COLORS['surface_2']};
     border: 1px solid {COLORS['border']};
     border-radius: 8px;
-    padding: 9px 16px;
+    padding: 10px 14px;
+    min-height: 18px;
     font-weight: 500;
 }}
 QPushButton:hover {{
@@ -162,5 +163,44 @@ QLabel#recIndicator {{
     color: {COLORS['danger']};
     font-weight: 700;
     letter-spacing: 1px;
+}}
+
+QListWidget {{
+    background-color: {COLORS['surface_2']};
+    border: 1px solid {COLORS['border']};
+    border-radius: 8px;
+    padding: 4px;
+}}
+QListWidget::item {{
+    padding: 6px 8px;
+    border-radius: 4px;
+}}
+QListWidget::item:selected {{
+    background-color: {COLORS['accent']};
+    color: #1A1A1A;
+}}
+QListWidget::item:hover {{
+    background-color: {COLORS['border']};
+}}
+
+QScrollArea {{
+    background: transparent;
+    border: none;
+}}
+QScrollBar:vertical {{
+    background: {COLORS['bg']};
+    width: 10px;
+    border-radius: 5px;
+}}
+QScrollBar::handle:vertical {{
+    background: {COLORS['border']};
+    border-radius: 5px;
+    min-height: 30px;
+}}
+QScrollBar::handle:vertical:hover {{
+    background: {COLORS['text_muted']};
+}}
+QScrollBar::add-line, QScrollBar::sub-line {{
+    height: 0;
 }}
 """

@@ -8,8 +8,9 @@ mediapipe==0.10.14
 
 # Face swap
 insightface==0.7.3
-onnxruntime==1.18.0
-# Если есть NVIDIA GPU с CUDA — замени на: onnxruntime-gpu==1.18.0
+# GPU-версия: использует CUDA если установлен CUDA Toolkit + cuDNN,
+# иначе автоматически работает на CPU
+onnxruntime-gpu==1.18.0
 
 # Utilities
 requests==2.32.3
