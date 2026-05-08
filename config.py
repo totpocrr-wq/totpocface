@@ -5,7 +5,7 @@ import sys
 
 
 APP_NAME = "FaceSwap Studio"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 APP_FOLDER_NAME = "FaceSwapStudio"
 
 

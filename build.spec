@@ -85,6 +85,13 @@ hidden += [
 # OpenCV
 hidden += ["cv2"]
 
+# pyvirtualcam — для трансляции в виртуальную камеру.
+# Может быть не установлен — это не критично, обернём в try.
+try:
+    hidden += collect_submodules("pyvirtualcam")
+except Exception:
+    pass
+
 
 # ---------- Бинарники ----------
 # scipy и numpy включают .pyd файлы, которые иначе не подхватываются

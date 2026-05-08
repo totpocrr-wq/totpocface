@@ -12,15 +12,17 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from core.camera import Camera
 from core.pose_detector import PoseDetector
 from core.face_swapper import FaceSwapper
+from core.live_swapper import LiveSwapEngine
 from core.video_processor import process_video
 from core.recorder import VideoRecorder
 
 
 class CameraWorker(QThread):
-    """Читает кадры, прогоняет через PoseDetector, отдаёт в UI."""
+    """Читает кадры, прогоняет через PoseDetector и (опц.) Live face swap."""
 
     frame_ready = pyqtSignal(np.ndarray)        # BGR кадр для отображения
     person_status = pyqtSignal(bool)             # найден ли человек
+    fps_update = pyqtSignal(float)               # средний FPS обработки
     error = pyqtSignal(str)
 
     def __init__(self, camera_index: int, parent=None):
@@ -30,12 +32,27 @@ class CameraWorker(QThread):
         self._show_skeleton = True
         self._recorder: VideoRecorder | None = None
 
+        # Live face swap (опционально)
+        self._live_engine: LiveSwapEngine | None = None
+        self._live_enabled = False
+
     def set_show_skeleton(self, show: bool):
         self._show_skeleton = show
 
     def attach_recorder(self, recorder: VideoRecorder | None):
-        """Привязать рекордер — кадры будут писаться, пока он активен."""
         self._recorder = recorder
+
+    def attach_live_engine(self, engine: LiveSwapEngine | None):
+        """Подключить движок live face swap. None → выключить."""
+        self._live_engine = engine
+
+    def set_live_enabled(self, enabled: bool):
+        """Включает/выключает live face swap без отсоединения engine."""
+        self._live_enabled = enabled
+        if self._live_engine and not enabled:
+            # При выключении сбросим кэш, чтобы при повторном включении
+            # не было артефактов с устаревшими позициями
+            self._live_engine.reset()
 
     def stop(self):
         self._running = False
@@ -46,6 +63,7 @@ class CameraWorker(QThread):
         try:
             with Camera(self.camera_index) as cam, PoseDetector() as pose:
                 last_emit = 0.0
+                last_fps_emit = 0.0
                 while self._running:
                     ok, frame = cam.read()
                     if not ok:
@@ -55,19 +73,35 @@ class CameraWorker(QThread):
                     # Зеркалим — привычнее как в зеркале
                     frame = cv2.flip(frame, 1)
 
-                    # Pose detection
-                    drawn, found = pose.process(frame.copy(), draw=self._show_skeleton)
+                    # Live face swap (если включён) — применяем ДО pose detection,
+                    # чтобы скелет рисовался на уже подменённом лице
+                    if self._live_enabled and self._live_engine is not None:
+                        frame = self._live_engine.process_frame(frame)
 
-                    # Запись (без скелета — чистый кадр)
+                    # Pose detection (только если не идёт запись с активным live-режимом —
+                    # чтобы не тратить FPS на скелет, когда главное — скорость)
+                    if self._show_skeleton:
+                        drawn, found = pose.process(frame.copy(), draw=True)
+                    else:
+                        # Просто проверяем наличие человека без отрисовки
+                        _, found = pose.process(frame.copy(), draw=False)
+                        drawn = frame
+
+                    # Запись — пишем уже подменённый кадр без скелета
                     if self._recorder is not None and self._recorder.is_active:
                         self._recorder.write(frame)
 
-                    # Throttle до ~30 FPS на UI, чтобы не душить event loop
+                    # Throttle до ~30 FPS на UI
                     now = time.time()
                     if now - last_emit >= 1 / 30:
                         self.frame_ready.emit(drawn)
                         self.person_status.emit(found)
                         last_emit = now
+
+                    # FPS обновляем раз в секунду
+                    if self._live_engine and now - last_fps_emit >= 1.0:
+                        self.fps_update.emit(self._live_engine.fps)
+                        last_fps_emit = now
         except Exception as e:
             self.error.emit(f"{e}\n{traceback.format_exc()}")
 

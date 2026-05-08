@@ -14,13 +14,14 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QFileDialog, QMessageBox, QProgressBar, QFrame, QStatusBar,
     QSizePolicy, QApplication, QScrollArea, QGroupBox, QListWidget,
-    QListWidgetItem, QDoubleSpinBox, QSlider,
+    QListWidgetItem, QDoubleSpinBox, QSlider, QCheckBox,
 )
 
 from config import APP_NAME, APP_VERSION, OUTPUT_DIR, VIDEO_EXTS, IMAGE_EXTS
 from core.camera import list_cameras, CameraInfo
 from core.recorder import VideoRecorder
 from core.overlay import Overlay, AnchorPoint
+from core.live_swapper import LiveSwapEngine
 from ui.styles import QSS, COLORS
 from ui.workers import (
     CameraWorker, ModelInitWorker, SourceLoadWorker, ProcessVideoWorker,
@@ -128,6 +129,10 @@ class MainWindow(QMainWindow):
         # Список накладываемых аксессуаров
         self.overlays: list[Overlay] = []
 
+        # Live face swap
+        self.live_engine: LiveSwapEngine | None = None
+        self.live_enabled: bool = False
+
         self._build_ui()
         self._refresh_cameras()
         self._init_models_async()
@@ -158,6 +163,12 @@ class MainWindow(QMainWindow):
         self.device_label = QLabel("")
         self.device_label.setObjectName("subtitle")
         header.addWidget(self.device_label)
+        header.addSpacing(16)
+
+        self.fps_label = QLabel("")
+        self.fps_label.setObjectName("subtitle")
+        self.fps_label.setVisible(False)
+        header.addWidget(self.fps_label)
         header.addSpacing(16)
 
         self.model_status = QLabel("Инициализация моделей…")
@@ -299,6 +310,44 @@ class MainWindow(QMainWindow):
         acc_card.add_layout(acc_btns)
         right.addWidget(acc_card)
 
+        # ---- 03c Live замена ----
+        live_card = Card("03c · Live замена в реальном времени")
+        live_hint = QLabel(
+            "Замена лица прямо в окне камеры — без записи. "
+            "Нужен запущенный поток камеры и выбранное лицо-донор Б. "
+            "Без CUDA скорость низкая."
+        )
+        live_hint.setObjectName("subtitle")
+        live_hint.setWordWrap(True)
+        live_card.add(live_hint)
+
+        self.live_toggle_btn = QPushButton("🔴 Включить Live")
+        self.live_toggle_btn.setObjectName("primary")
+        self.live_toggle_btn.setEnabled(False)
+        self.live_toggle_btn.clicked.connect(self._toggle_live)
+        live_card.add(self.live_toggle_btn)
+
+        self.virtual_cam_chk = QCheckBox("📹 Транслировать в виртуальную камеру")
+        self.virtual_cam_chk.setEnabled(False)
+        self.virtual_cam_chk.toggled.connect(self._toggle_virtual_camera)
+        live_card.add(self.virtual_cam_chk)
+
+        vcam_hint = QLabel(
+            "Для трансляции нужна OBS Virtual Camera. "
+            "Установи OBS Studio (бесплатно, obsproject.com) и запусти один раз — "
+            "после этого Zoom / Discord / Chrome увидят виртуальную камеру."
+        )
+        vcam_hint.setObjectName("subtitle")
+        vcam_hint.setWordWrap(True)
+        live_card.add(vcam_hint)
+
+        self.live_status = QLabel("")
+        self.live_status.setObjectName("subtitle")
+        self.live_status.setWordWrap(True)
+        self.live_status.setMinimumHeight(20)
+        live_card.add(self.live_status)
+        right.addWidget(live_card)
+
         # ---- 04 Замена ----
         proc_card = Card("04 · Замена А → Б")
         self.process_btn = QPushButton("Обработать видео")
@@ -411,6 +460,7 @@ class MainWindow(QMainWindow):
         self.camera_worker = CameraWorker(idx)
         self.camera_worker.frame_ready.connect(self._on_frame)
         self.camera_worker.person_status.connect(self._on_person_status)
+        self.camera_worker.fps_update.connect(self._on_fps_update)
         self.camera_worker.error.connect(
             lambda m: QMessageBox.critical(self, "Ошибка камеры", m)
         )
@@ -418,10 +468,14 @@ class MainWindow(QMainWindow):
         self.start_cam_btn.setText("Остановить камеру")
         self.record_btn.setEnabled(True)
         self.record_status.setText("Готов к записи")
+        self._update_live_button()
 
     def _stop_camera(self):
         if self.recorder.is_active:
             self._stop_recording()
+        # Выключаем live-режим при остановке камеры
+        if self.live_enabled:
+            self._toggle_live()
         if self.camera_worker:
             self.camera_worker.stop()
             self.camera_worker = None
@@ -429,6 +483,8 @@ class MainWindow(QMainWindow):
         self.record_btn.setEnabled(False)
         self.preview_label.setText("Камера остановлена")
         self.preview_label.setPixmap(QPixmap())
+        self.fps_label.setVisible(False)
+        self._update_live_button()
 
     @pyqtSlot(np.ndarray)
     def _on_frame(self, frame_bgr: np.ndarray):
@@ -539,6 +595,7 @@ class MainWindow(QMainWindow):
             self.source_status.setText(msg)
             self.source_status.setStyleSheet(f"color: {COLORS['danger']};")
         self._update_process_button()
+        self._update_live_button()
 
     # -----------------------------------------------------------------
     #  Аксессуары (overlays)
@@ -644,6 +701,96 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Ошибка обработки", msg)
 
     # -----------------------------------------------------------------
+    #  Live face swap
+    # -----------------------------------------------------------------
+    def _update_live_button(self):
+        """Активируем кнопку Live, если есть камера и лицо Б."""
+        ready = (
+            self.camera_worker is not None
+            and self.camera_worker.isRunning()
+            and self.swapper is not None
+            and self.swapper.has_source
+        )
+        self.live_toggle_btn.setEnabled(ready)
+        # Если выключили готовность — скрываем чекбокс vcam
+        if not ready and self.live_enabled:
+            self._toggle_live()
+
+    def _toggle_live(self):
+        """Включает / выключает Live face swap."""
+        if not self.live_enabled:
+            # ВКЛЮЧЕНИЕ
+            if not (self.camera_worker and self.swapper and self.swapper.has_source):
+                return
+            # Создаём engine при первом включении (или после reset)
+            if self.live_engine is None:
+                self.live_engine = LiveSwapEngine(self.swapper)
+            self.camera_worker.attach_live_engine(self.live_engine)
+            self.camera_worker.set_live_enabled(True)
+            self.live_enabled = True
+            self.live_toggle_btn.setText("⏸ Выключить Live")
+            self.fps_label.setVisible(True)
+            self.fps_label.setText("FPS: …")
+            self.virtual_cam_chk.setEnabled(True)
+            self.live_status.setText(
+                "Live включён. Лицо подменяется в реальном времени."
+            )
+            self.live_status.setStyleSheet(f"color: {COLORS['ok']};")
+        else:
+            # ВЫКЛЮЧЕНИЕ
+            if self.virtual_cam_chk.isChecked():
+                self.virtual_cam_chk.setChecked(False)
+            if self.camera_worker:
+                self.camera_worker.set_live_enabled(False)
+                self.camera_worker.attach_live_engine(None)
+            if self.live_engine:
+                self.live_engine.close()
+            self.live_enabled = False
+            self.live_toggle_btn.setText("🔴 Включить Live")
+            self.fps_label.setVisible(False)
+            self.virtual_cam_chk.setEnabled(False)
+            self.live_status.setText("")
+
+    def _toggle_virtual_camera(self, checked: bool):
+        """Включает/выключает трансляцию в виртуальную камеру."""
+        if not self.live_engine:
+            return
+        if checked:
+            # Стандартный размер для большинства приложений
+            ok, msg = self.live_engine.start_virtual_camera(640, 480, fps=30)
+            if ok:
+                self.live_status.setText(f"📹 {msg}")
+                self.live_status.setStyleSheet(f"color: {COLORS['ok']};")
+            else:
+                # Откатываем чекбокс, чтобы пользователь видел что не включилось
+                self.virtual_cam_chk.blockSignals(True)
+                self.virtual_cam_chk.setChecked(False)
+                self.virtual_cam_chk.blockSignals(False)
+                self.live_status.setText(msg)
+                self.live_status.setStyleSheet(f"color: {COLORS['danger']};")
+                QMessageBox.warning(
+                    self, "Виртуальная камера недоступна", msg,
+                )
+        else:
+            self.live_engine.stop_virtual_camera()
+            self.live_status.setText(
+                "Live включён. Лицо подменяется в реальном времени."
+            )
+            self.live_status.setStyleSheet(f"color: {COLORS['ok']};")
+
+    @pyqtSlot(float)
+    def _on_fps_update(self, fps: float):
+        if self.live_enabled and fps > 0:
+            self.fps_label.setText(f"FPS: {fps:.1f}")
+            # Цветовой индикатор скорости
+            if fps >= 15:
+                self.fps_label.setStyleSheet(f"color: {COLORS['ok']};")
+            elif fps >= 8:
+                self.fps_label.setStyleSheet(f"color: {COLORS['accent']};")
+            else:
+                self.fps_label.setStyleSheet(f"color: {COLORS['danger']};")
+
+    # -----------------------------------------------------------------
     #  Утилиты
     # -----------------------------------------------------------------
     def _open_output_dir(self):
@@ -656,6 +803,9 @@ class MainWindow(QMainWindow):
             subprocess.Popen(["xdg-open", str(path)])
 
     def closeEvent(self, event):
+        # Корректное завершение всех ресурсов
+        if self.live_engine:
+            self.live_engine.close()
         if self.camera_worker:
             self.camera_worker.stop()
         if self.recorder.is_active:
